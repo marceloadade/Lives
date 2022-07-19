@@ -63,21 +63,26 @@ link -> https://www.postgresql.org/download/linux/redhat/
 
 
 
-5. Install the Confluent client
-link -> https://packages.confluent.io/archive/7.2/?_ga=2.115818373.223632919.1658170586-1960284151.1647905570&_gac=1.148378181.1658170590.Cj0KCQjwidSWBhDdARIsAIoTVb1OuTxERpnT6YvQX8qIAoh3J4t_muPHmuAQrRaGkeTNOI-1HaTvubIaAjhmEALw_wcB
-link -> https://docs.confluent.io/platform/current/quickstart/ce-docker-quickstart.html
+ 5. Install the Confluent client: <br>
+	link -> https://packages.confluent.io/archive/7.2/?_ga=2.115818373.223632919.1658170586-1960284151.1647905570&_gac=1.148378181.1658170590.Cj0KCQjwidSWBhDdARIsAIoTVb1OuTxERpnT6YvQX8qIAoh3J4t_muPHmuAQrRaGkeTNOI-1HaTvubIaAjhmEALw_wcB
+	link -> https://docs.confluent.io/platform/current/quickstart/ce-docker-quickstart.html
 
-cd /root
-vim .bash_profile
-export
-export PATH= 
+	cd /root <br>
+	vim .bash_profile <br>
+	add to the file -> <br>
+	export CONFLUENT_HOME = /opt/confluent_7_0 --The path to your confluent home here! <br>
+	export PATH=$PATH:$CONFLUENT_HOME/bin
+	:wq! <- to write the file
+	
+	to reload the profile:
+	source ~/.bash_profile
 
-Install Java runtime
-yum install java
+	Install the Java runtime:
+	yum install java
 
-disable firewall for the sake of demonstration:
-systemctl stop firewalld
-systemctl disable firewalld
+	disable firewall for the sake of the demonstration: <br>
+	systemctl stop firewalld <br>
+	systemctl disable firewalld <br>
 
 
 6. Install debezium for postgres
