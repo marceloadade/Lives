@@ -1,2 +1,2 @@
 # Lives
-All presentations and code for Lives and sessions are here
+You can find the code for all presentations, lives and videos here.
