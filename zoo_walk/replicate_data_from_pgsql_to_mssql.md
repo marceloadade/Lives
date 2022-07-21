@@ -70,7 +70,7 @@ link -> https://www.postgresql.org/download/linux/redhat/
 	cd /root <br>
 	vim .bash_profile <br>
 	add to the file -> <br>
-	export CONFLUENT_HOME = /opt/confluent_7_0 --The path to your confluent home here! <br>
+	export CONFLUENT_HOME=/opt/confluent-7.2.0 --The path to your confluent home here! <br>
 	export PATH=$PATH:$CONFLUENT_HOME/bin
 	:wq! <- to write the file
 	
@@ -85,108 +85,107 @@ link -> https://www.postgresql.org/download/linux/redhat/
 	systemctl disable firewalld <br>
 
 
-6. Install debezium for postgres
-https://docs.confluent.io/debezium-connect-postgres-source/current/overview.html
-confluent-hub install debezium/debezium-connector-postgresql:latest
+  6. Install debezium for postgres <br>
+	https://docs.confluent.io/debezium-connect-postgres-source/current/overview.html <br>
+	confluent-hub install debezium/debezium-connector-postgresql:latest <br>
 
-7. Install the JDBC driver for Sink data
-https://docs.confluent.io/kafka-connect-jdbc/current/index.html
-confluent-hub install confluentinc/kafka-connect-jdbc:latest
+  7. Install the JDBC driver for Sink data <br>
+	https://docs.confluent.io/kafka-connect-jdbc/current/index.html <br>
+	confluent-hub install confluentinc/kafka-connect-jdbc:latest <br>
 
-check all the plugins
+   check all the plugins <br>
 
-confluent local services connect plugin list
-
-
-7. Setup pgoutput as a Replication standard
-https://debezium.io/documentation/reference/stable/connectors/postgresql.html#setting-up-postgresql
-
-in postgresql.conf
-
-#Replication
-wal_level = logical  
-
-restart postgres
-
-setup permissions
-create a superuser
-
-9. Configure the connector for the Producer
-
-vim postgres-debezium.json
-{
-    "name": "postgres-debezium",
-    "config": {
-    "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
-    "database.hostname": "localhost",
-    "plugin.name": "pgoutput",
-    "publication.name": "publication_debezium",
-    "database.port": "5432",
-    "database.user": "kafka",
-    "database.password": "kafka",
-    "database.dbname" : "producer",
-    "database.server.name": "jupiter",
-    "transforms": "unwrap",
-    "transforms.unwrap.type":"io.debezium.transforms.ExtractNewRecordState",
-    "transforms.unwrap.add.fields":"op,table,lsn,source.ts_ms",
-    "transforms.unwrap.drop.tombstones": "false"
-    }
-   }
-
-curl -X POST -H “Content-Type: application/json” — data @caminho-do-arquivo-json servidor-do-kafka-connect:porta-do-kafka-connect/connectors | jq -r
-curl -X POST -H “Content-Type: application/json” --data @/etc/kafka-connect-postgresql/postgres.json localhost:8083/connectors | jq -r
-
-curl -X POST -H "Content-Type: application/json" --data @/opt/stage/postgres-debezium.json localhost:8083/connectors | jq -r
-
-curl localhost:8083/connectors/postgres-debezium/status | jq -r
-
-kafka-topics --bootstrap-server=localhost:9092 --list 
-
-kafka-console-consumer --bootstrap-server localhost:9092 --topic  --from-beginning
-
-10. Configure the connector for the Consumer
-
-vim jdbc-sqlserver-sink.json
-
-{
-        "name": "jdbc-sqlserver-sink",
-        "config": {
-            "connector.class": "io.confluent.connect.jdbc.JdbcSinkConnector",
-            "tasks.max": "1",
-            "key.converter": "io.confluent.connect.avro.AvroConverter",
-            "key.converter.schema.registry.url": "http://localhost:8081",
-            "value.converter": "io.confluent.connect.avro.AvroConverter",
-            "value.converter.schema.registry.url": "http://localhost:8081",
-            "header.converter": "org.apache.kafka.connect.storage.SimpleHeaderConverter",
-            "topics": "jupiter2.public.person",
-            "connection.url": "jdbc:sqlserver://192.168.0.207:1433;databaseName=pombo;",
-            "connection.user": "kafka",
-            "connection.password": "kafka",
-            "insert.mode": "upsert",
-            "pk.mode": "record_key",
-            "pk.fields": "id",
-            "auto.create": "true",
-            "auto.evolve": "false",
-            "max.retries": "1",
-            "delete.enabled":"true",
-            "transforms": "dropPrefix,unwrap",
-            "transforms.dropPrefix.type": "org.apache.kafka.connect.transforms.RegexRouter",
-            "transforms.dropPrefix.regex": "jupiter2\.public\.(.*)",
-            "transforms.dropPrefix.replacement": "$1",
-            "transforms.unwrap.type":  "io.debezium.transforms.ExtractNewRecordState",
-            "transforms.unwrap.drop.tombstones": "false"
-            }
-        }
-
-curl -X POST -H "Content-Type: application/json" --data @/opt/stage/jdbc-sqlserver-sink.json localhost:8083/connectors | jq -r
-
-curl localhost:8083/connectors/jdbc-sqlserver-sink/status | jq -r
-
-do soe stuff with the data in the origin: 
+   confluent local services connect plugin list <br>
 
 
-select * from person;
+  8. Setup pgoutput as a Replication standard <br>
+  https://debezium.io/documentation/reference/stable/connectors/postgresql.html#setting-up-postgresql <br>
+  in postgresql.conf <br>
 
-update person set email = 'pombo@gmail.com' where id = 8
+  #Replication <br>
+  wal_level = logical <br>
 
-delete from person where id = 10
+  restart postgres <br>
+
+  setup permissions <br>
+  create a superuser <br>
+
+  9. Configure the connector for the Producer <br>
+
+  vim postgres-debezium.json <br>
+{ <br>
+    "name": "postgres-debezium", <br>
+    "config": { <br>
+    "connector.class": "io.debezium.connector.postgresql.PostgresConnector", <br>
+    "database.hostname": "localhost", <br>
+    "plugin.name": "pgoutput", <br>
+    "publication.name": "publication_debezium", <br>
+    "database.port": "5432", <br>
+    "database.user": "kafka", <br>
+    "database.password": "kafka", <br>
+    "database.dbname" : "producer", <br>
+    "database.server.name": "jupiter", <br>
+    "transforms": "unwrap", <br>
+    "transforms.unwrap.type":"io.debezium.transforms.ExtractNewRecordState", <br>
+    "transforms.unwrap.add.fields":"op,table,lsn,source.ts_ms", <br>
+    "transforms.unwrap.drop.tombstones": "false" <br>
+    } <br>
+   } <br>
+
+   curl -X POST -H “Content-Type: application/json” — data @caminho-do-arquivo-json servidor-do-kafka-connect:porta-do-kafka-connect/connectors | jq -r <br>
+   curl -X POST -H “Content-Type: application/json” --data @/etc/kafka-connect-postgresql/postgres.json localhost:8083/connectors | jq -r <br>
+
+   curl -X POST -H "Content-Type: application/json" --data @/opt/stage/postgres-debezium.json localhost:8083/connectors | jq -r <br>
+
+   curl localhost:8083/connectors/postgres-debezium/status | jq -r <br>
+
+   kafka-topics --bootstrap-server=localhost:9092 --list  <br>
+
+   kafka-console-consumer --bootstrap-server localhost:9092 --topic  --from-beginning <br>
+
+  10. Configure the connector for the Consumer <br>
+
+  vim jdbc-sqlserver-sink.json <br>
+
+  { <br>
+        "name": "jdbc-sqlserver-sink", <br>
+        "config": { <br>
+            "connector.class": "io.confluent.connect.jdbc.JdbcSinkConnector", <br>
+            "tasks.max": "1", <br>
+            "key.converter": "io.confluent.connect.avro.AvroConverter", <br>
+            "key.converter.schema.registry.url": "http://localhost:8081", <br>
+            "value.converter": "io.confluent.connect.avro.AvroConverter", <br>
+            "value.converter.schema.registry.url": "http://localhost:8081", <br>
+            "header.converter": "org.apache.kafka.connect.storage.SimpleHeaderConverter", <br>
+            "topics": "jupiter2.public.person", <br>
+            "connection.url": "jdbc:sqlserver://sqlserverip:1433;databaseName=<<dbname>>;", <br>
+            "connection.user": "kafka", <br>
+            "connection.password": "password", <br>
+            "insert.mode": "upsert", <br>
+            "pk.mode": "record_key", <br>
+            "pk.fields": "id", <br>
+            "auto.create": "true", <br>
+            "auto.evolve": "false", <br>
+            "max.retries": "1", <br>
+            "delete.enabled":"true", <br>
+            "transforms": "dropPrefix,unwrap", <br>
+            "transforms.dropPrefix.type": "org.apache.kafka.connect.transforms.RegexRouter", <br>
+            "transforms.dropPrefix.regex": "jupiter2.public.(.*)", <br>
+            "transforms.dropPrefix.replacement": "$1", <br>
+            "transforms.unwrap.type":  "io.debezium.transforms.ExtractNewRecordState", <br>
+            "transforms.unwrap.drop.tombstones": "false" <br>
+            } <br>
+        } <br>
+
+curl -X POST -H "Content-Type: application/json" --data @/opt/stage/jdbc-sqlserver-sink.json localhost:8083/connectors | jq -r <br>
+
+curl localhost:8083/connectors/jdbc-sqlserver-sink/status | jq -r <br>
+ 
+do soe stuff with the data in the origin:  <br>
+
+--shuffle some data <br>
+select * from person; <br>
+
+update person set email = 'pombo@gmail.com' where id = 8 <br>
+
+delete from person where id = 10 <br>
