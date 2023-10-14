@@ -1,0 +1,115 @@
+--reverse connectors
+
+--add some dummy data and enable CDC on SQL Server
+--create database
+create database producerdb
+
+--create sample data:
+CREATE TABLE dept (
+deptno INT NOT NULL primary key,
+dname VARCHAR(14),
+loc VARCHAR(13))
+begin
+insert into dept values (1,'ACCOUNTING','ST LOUIS')
+insert into dept values (2,'RESEARCH','NEW YORK')
+insert into dept values (3,'SALES','ATLANTA')
+insert into dept values (4, 'OPERATIONS','SEATTLE')
+end
+
+--drop TABLE dept
+
+--enable CDC:
+EXEC sys.sp_cdc_enable_db
+
+--on the specific table:
+
+EXEC sys.sp_cdc_enable_table
+@source_schema = N'dbo',
+@source_name   = N'dept',
+@role_name     = NULL,
+@supports_net_changes = 1
+GO
+
+--install debezium for sql server
+
+--configure connectors
+
+
+--Configure the connector for the Producer
+
+cd /opt/connectors/
+
+vim sqlserver-source-debezium.json
+{
+    "name": "sqlserver-source-debezium",
+    "config": {
+    "connector.class": "io.debezium.connector.sqlserver.SqlServerConnector",
+    "database.hostname": "192.168.110.191",
+    "database.port": "1433", 
+    "database.user": "kafkasql", 
+    "database.password": "kafkasql", 
+	"database.names": "producerdb",
+	"topic.prefix": "sqlserversource", 
+    "table.include.list": "dbo.dept", 
+	"schema.history.internal.kafka.bootstrap.servers": "kafka:9092", 
+    "schema.history.internal.kafka.topic": "schemahistory.sqlserversource",
+	"database.encrypt": "false"
+    }
+   }
+
+
+--ignite the connector for source:
+
+curl -X POST -H "Content-Type: application/json" --data @/opt/connectors/sqlserver-source-debezium.json localhost:8083/connectors | jq -r
+
+--check that the connector is alive:
+curl localhost:8083/connectors/sqlserver-source-debezium/status | jq -r
+
+curl -X DELETE localhost:8083/connectors/sqlserver-source-debezium
+
+kafka-topics --list --bootstrap-server localhost:9092
+
+kafka-console-consumer --bootstrap-server localhost:9092 --topic <<name of the topic here>> --from-beginning
+
+vim jdbc-postgres-sink.json
+
+{
+"name": "jdbc-postgres-sink",
+"config": {
+"connector.class": "io.confluent.connect.jdbc.JdbcSinkConnector",
+"tasks.max": "1",
+"key.converter": "io.confluent.connect.avro.AvroConverter",
+"key.converter.schema.registry.url": "http://localhost:8081",
+"value.converter": "io.confluent.connect.avro.AvroConverter",
+"value.converter.schema.registry.url": "http://localhost:8081",
+"header.converter": "org.apache.kafka.connect.storage.SimpleHeaderConverter",
+"topics": "sqlserversource.producerdb.dbo.dept",
+"connection.url": "jdbc:postgresql://localhost:5432/pgconsumer",
+"connection.user": "kafka",
+"connection.password": "kafka",
+"insert.mode": "upsert",
+"pk.mode": "record_key",
+"pk.fields": "deptno",
+"auto.create": "true",
+"auto.evolve": "false",
+"max.retries": "1",
+"transforms": "dropPrefix,unwrap",
+"transforms.dropPrefix.type": "org.apache.kafka.connect.transforms.RegexRouter",
+"transforms.dropPrefix.regex": "sqlserversource.producerdb.dbo.(.*)",
+"transforms.dropPrefix.replacement": "$1",
+"transforms.unwrap.type": "io.debezium.transforms.ExtractNewRecordState",
+"transforms.unwrap.drop.tombstones": "false"
+}
+}
+
+curl -X POST -H "Content-Type: application/json" --data @/opt/connectors/jdbc-postgres-sink.json localhost:8083/connectors | jq -r
+
+--check that the connector is alive:
+curl localhost:8083/connectors/jdbc-postgres-sink/status | jq -r
+
+curl -X DELETE localhost:8083/connectors/jdbc-postgres-sink
+
+
+
+
+

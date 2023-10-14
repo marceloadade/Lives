@@ -1,0 +1,327 @@
+VM details:
+--name: rhelkafka
+--ip: 192.168.110.191
+--user: marcelo
+--root
+--p: P@$$w0rd
+
+2. Install Postgres
+from https://www.postgresql.org/download/linux/redhat/
+
+sudo dnf install -y https://download.postgresql.org/pub/repos/yum/reporpms/EL-8-x86_64/pgdg-redhat-repo-latest.noarch.rpm
+sudo dnf -qy module disable postgresql
+sudo dnf install -y postgresql14-server
+sudo /usr/pgsql-14/bin/postgresql-14-setup initdb
+sudo systemctl enable postgresql-14
+sudo systemctl start postgresql-14
+
+
+3. Configure pgsql
+edit postgresql.cong
+find / -name "postgresql.conf"
+/var/lib/pgsql/9.4/data/postgresql.conf
+vim /var/lib/pgsql/9.4/data/postgresql.conf
+add listen_addresses = '*'
+
+edit pg_hba.conf
+add to the end:
+host    all             all              0.0.0.0/0                       md5
+host    all             all              ::/0                            md5
+host    all             all              192.168.0.66/32(<-your ip here)   md5
+
+set the firewall properly
+firewall-cmd --permanent --zone=trusted --add-port=5432/tcp
+firewall-cmd --reload
+firewall-cmd --permanent --zone=trusted --add-source=192.168.0.105/32
+firewall-cmd --reload
+firewall-cmd --permanent --zone=trusted --add-source=192.168.110.1/32
+firewall-cmd --reload
+
+sudo systemctl stop postgresql-14
+sudo systemctl start postgresql-14
+
+create a super user 
+su - postgres
+psql
+CREATE ROLE masteruser WITH LOGIN SUPERUSER PASSWORD 'P@$$w0rd';
+
+--via pgadmin
+4. Add some data
+
+CREATE DATABASE kfksource
+    WITH
+    OWNER = masteruser
+    ENCODING = 'UTF8'
+    LC_COLLATE = 'en_US.UTF-8'
+    LC_CTYPE = 'en_US.UTF-8'
+    TABLESPACE = pg_default
+    CONNECTION LIMIT = -1
+    IS_TEMPLATE = False;
+
+COMMENT ON DATABASE kfksource
+    IS 'source for the kafka test';
+
+CREATE TABLE IF NOT EXISTS public.person
+(
+    id integer NOT NULL GENERATED ALWAYS AS IDENTITY ( INCREMENT 1 START 1 MINVALUE 1 MAXVALUE 2147483647 CACHE 1 ),
+    first_name character varying(100) COLLATE pg_catalog."default" NOT NULL,
+    last_name character varying(100) COLLATE pg_catalog."default" NOT NULL,
+    email character varying(400) COLLATE pg_catalog."default" NOT NULL,
+    CONSTRAINT person_pkey PRIMARY KEY (id)
+)TABLESPACE pg_default;
+
+insert into public.person(first_name,last_name,email)values('Don','Wright','dw@acme.com');
+insert into public.person(first_name,last_name,email)values('Richard','Monroe','richm@swampinc.com');
+insert into public.person(first_name,last_name,email)values('Lenore','Leane','lleane@vcloud.net');
+insert into public.person(first_name,last_name,email)values('Don','Wright','dw@acme.com');
+insert into public.person(first_name,last_name,email)values('Richard','Monroe','richm@swampinc.com');
+insert into public.person(first_name,last_name,email)values('Lenore','Leane','lleane@vcloud.net');
+insert into public.person(first_name,last_name,email)values('The Seventh','Charm','tsc@gmail.com');
+insert into public.person(first_name,last_name,email)values('The Eight','Working','ew@gmail.com');
+insert into public.person(first_name,last_name,email)values('The tenth','The tenth first','ttt@gmail.com');
+
+select * from person;
+
+5. Install the Confluent client
+https://packages.confluent.io/archive/7.2/?_ga=2.115818373.223632919.1658170586-1960284151.1647905570&_gac=1.148378181.1658170590.Cj0KCQjwidSWBhDdARIsAIoTVb1OuTxERpnT6YvQX8qIAoh3J4t_muPHmuAQrRaGkeTNOI-1HaTvubIaAjhmEALw_wcB
+
+https://docs.confluent.io/platform/current/quickstart/ce-docker-quickstart.html
+
+https://www.confluent.io/installation/
+download LOCAL edition
+
+follow quick start: https://docs.confluent.io/platform/6.2/quickstart/ce-quickstart.html
+
+cd /root
+vim .bash_profile
+export
+export PATH= 
+
+Install Java runtime
+yum install java
+
+installed on /opt/confluent-7.5.0
+
+disable firewall for the sake of demonstration:
+systemctl stop firewalld
+systemctl disable firewalld
+
+--make sure network is working as expected, 2 nics, one local and another pointed to the internet
+
+6. Install debezium for postgres
+https://docs.confluent.io/debezium-connect-postgres-source/current/overview.html
+confluent-hub install debezium/debezium-connector-postgresql:latest
+
+7. Install the JDBC driver for Sink data
+https://docs.confluent.io/kafka-connect-jdbc/current/index.html
+confluent-hub install confluentinc/kafka-connect-jdbc:latest
+
+--check all the plugins
+
+confluent local services connect plugin list
+
+
+ERROR Stopping due to error (org.apache.kafka.connect.cli.AbstractConnectCli:107)
+java.lang.UnsupportedClassVersionError: 
+io/debezium/connector/postgresql/rest/DebeziumPostgresConnectRestExtension 
+has been compiled by a more recent version of the Java Runtime 
+(class file version 55.0), this version of the Java Runtime only recognizes class file versions up to 52.0
+
+--choose the right java env:
+alternatives --config java
+--desired runtime version: 11
+
+
+7. Setup pgoutput as a Replication standard
+https://debezium.io/documentation/reference/stable/connectors/postgresql.html#setting-up-postgresql
+
+in postgresql.conf
+
+#Replication
+wal_level = logical  
+
+restart postgres
+
+setup permissions
+create a superuser
+
+9. Configure the connector for the Producer
+
+cd /opt/connectors/
+
+vim postgres-debezium.json
+{
+    "name": "postgres-debezium",
+    "config": {
+    "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
+    "database.hostname": "localhost",
+    "plugin.name": "pgoutput",
+    "publication.name": "publication_debezium",
+    "database.port": "5432",
+    "database.user": "kafka",
+    "database.password": "kafka",
+    "database.dbname" : "kfksource",
+    "database.server.name": "rhelkafka",
+    "transforms": "unwrap",
+    "transforms.unwrap.type":"io.debezium.transforms.ExtractNewRecordState",
+    "transforms.unwrap.add.fields":"op,table,lsn,source.ts_ms",
+    "transforms.unwrap.drop.tombstones": "false"
+	"topic.prefix":"source"
+
+    }
+   }
+
+--ignite the connector for source:
+
+curl -X POST -H "Content-Type: application/json" --data @/opt/stage/postgres-debezium.json localhost:8083/connectors | jq -r
+
+--check that the connector is alive:
+curl localhost:8083/connectors/postgres-debezium/status | jq -r
+
+--check all topics:
+kafka-topics --bootstrap-server=localhost:9092 --list 
+
+--check contents
+kafka-console-consumer --bootstrap-server localhost:9092 --topic <<name of the topic here>> --from-beginning
+
+
+10. Configure the connector for the Consumer SQL Server
+
+vim jdbc-sqlserver-sink.json
+
+{
+"name": "jdbc-sqlserver-sink",
+"config": {
+"connector.class": "io.confluent.connect.jdbc.JdbcSinkConnector",
+"tasks.max": "1",
+"key.converter": "io.confluent.connect.avro.AvroConverter",
+"key.converter.schema.registry.url": "http://localhost:8081",
+"value.converter": "io.confluent.connect.avro.AvroConverter",
+"value.converter.schema.registry.url": "http://localhost:8081",
+"header.converter": "org.apache.kafka.connect.storage.SimpleHeaderConverter",
+"topics": "source.public.person",
+"connection.url": "jdbc:sqlserver://192.168.110.1:1433;databaseName=consumerdb;",
+"connection.user": "kafkasql",
+"connection.password": "kafkasql",
+"insert.mode": "upsert",
+"pk.mode": "record_key",
+"pk.fields": "id",
+"auto.create": "true",
+"auto.evolve": "false",
+"max.retries": "1",
+"delete.enabled":"true",
+"transforms": "dropPrefix,unwrap",
+"transforms.dropPrefix.type": "org.apache.kafka.connect.transforms.RegexRouter",
+"transforms.dropPrefix.regex": "source.public.(.*)",
+"transforms.dropPrefix.replacement": "$1",
+"transforms.unwrap.type": "io.debezium.transforms.ExtractNewRecordState",
+"transforms.unwrap.drop.tombstones": "false"
+}
+}
+
+curl -X POST -H "Content-Type: application/json" --data @/opt/stage/jdbc-sqlserver-sink.json localhost:8083/connectors | jq -r
+
+curl localhost:8083/connectors/jdbc-sqlserver-sink/status | jq -r
+
+
+--test it:
+--also delete and update
+
+insert into public.person(first_name,last_name,email)values('Dave','Berg','dberg@mad.com');
+
+update person set email = 'origin@gmail.com' where id = 8
+
+delete from person where id = 10
+
+-------------------------------------------------------------------------------------------------------
+--useful commands
+--delete a connector
+curl -X DELETE localhost:8083/connectors/jdbc-sqlserver-sink
+
+confluent local services connect log
+
+--list topics
+kafka-topics --list --bootstrap-server localhost:9092
+
+--reset the offset: remove the /tmp/confluent.* folders
+rm -rf /tmp/confluent.* 
+
+--list connectors
+curl localhost:8083/connectors
+------------------------------------------------------------------------------------------------
+
+--increase the db schema:
+
+CREATE TABLE IF NOT EXISTS public.dream_address
+(
+    id integer NOT NULL GENERATED ALWAYS AS IDENTITY ( INCREMENT 1 START 1 MINVALUE 1 MAXVALUE 2147483647 CACHE 1 ),
+    street_name character varying(500) COLLATE pg_catalog."default" NOT NULL,
+    street_number integer NOT NULL,
+    street_type character varying(100) COLLATE pg_catalog."default" NOT NULL,
+	city character varying(100) COLLATE pg_catalog."default" NOT NULL,
+	state character(2) COLLATE pg_catalog."default" NOT NULL,
+	zip integer NOT NULL,
+    CONSTRAINT address_pkey PRIMARY KEY (id)
+)TABLESPACE pg_default;
+
+insert into public.dream_address(street_name,street_number,street_type,city,state,zip)values('Acme',112,'street','Boston','MA',15447);
+insert into public.dream_address(street_name,street_number,street_type,city,state,zip)values('Perdition',52,'Road','New York','NY',21455);
+insert into public.dream_address(street_name,street_number,street_type,city,state,zip)values('Elm',34,'street','Chicago','IL',98744);
+insert into public.dream_address(street_name,street_number,street_type,city,state,zip)values('New Age ',9985,'Parkway','San Jose','CA',85444);
+insert into public.dream_address(street_name,street_number,street_type,city,state,zip)values('Aldereen ',88,'street','Orlando','FL',54655);
+insert into public.dream_address(street_name,street_number,street_type,city,state,zip)values('Sherman Oaks ',88745,'street','Portland','OR',95414);
+
+--check the topics
+
+kafka-topics --list --bootstrap-server localhost:9092
+
+--adjust the SQL Server SINK 
+--drop the existing connector
+curl -X DELETE localhost:8083/connectors/jdbc-sqlserver-sink
+
+
+--create a new one:
+cd /opt/connectors
+vim jdbc-sqlserver-sink.json
+
+
+{
+"name": "jdbc-sqlserver-sink",
+"config": {
+"connector.class": "io.confluent.connect.jdbc.JdbcSinkConnector",
+"tasks.max": "1",
+"key.converter": "io.confluent.connect.avro.AvroConverter",
+"key.converter.schema.registry.url": "http://localhost:8081",
+"value.converter": "io.confluent.connect.avro.AvroConverter",
+"value.converter.schema.registry.url": "http://localhost:8081",
+"header.converter": "org.apache.kafka.connect.storage.SimpleHeaderConverter",
+"topics.regex": "source.public.*",
+"connection.url": "jdbc:sqlserver://192.168.110.1:1433;databaseName=consumerdb;",
+"connection.user": "kafkasql",
+"connection.password": "kafkasql",
+"insert.mode": "upsert",
+"pk.mode": "record_key",
+"pk.fields": "id",
+"auto.create": "true",
+"auto.evolve": "false",
+"max.retries": "1",
+"delete.enabled":"true",
+"transforms": "dropPrefix,unwrap",
+"transforms.dropPrefix.type": "org.apache.kafka.connect.transforms.RegexRouter",
+"transforms.dropPrefix.regex": "source.public.(.*)",
+"transforms.dropPrefix.replacement": "$1",
+"transforms.unwrap.type": "io.debezium.transforms.ExtractNewRecordState",
+"transforms.unwrap.drop.tombstones": "false"
+}
+}
+
+curl -X POST -H "Content-Type: application/json" --data @/opt/connectors/jdbc-sqlserver-sink.json localhost:8083/connectors | jq -r
+
+curl localhost:8083/connectors/jdbc-sqlserver-sink/status | jq -r
+
+--check tables
+
+
+
+
+
