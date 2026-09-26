@@ -1,47 +1,13 @@
 ---
-# How Ansible connects to Windows machines.
-#
-# Worth knowing: there is no Python on these servers. Ansible modules for
-# Windows are written in PowerShell instead.
-
-# WinRM is Windows' own remote management service. It is already part of
-# Windows Server — nothing is installed on the target to make this work, which
-# is the same promise as SSH on Linux.
 ansible_connection: winrm
 ansible_port: 5985
 
-# "ntlm" means: log in with a plain username and password, no domain and no
-# certificates needed. That is the right choice for a standalone lab. In a
-# domain you would use "kerberos" instead, and get single sign-on with it.
 ansible_winrm_transport: ntlm
 
-# Port 5985 is the HTTP port, which sounds alarming. It isn't, with NTLM:
-# Ansible encrypts the message itself before sending it, so nothing readable
-# goes over the wire. Port 5986 (HTTPS) also exists and needs a certificate on
-# every server, which is a real job and not a lab one.
 ansible_winrm_scheme: http
 
-# A DOMAIN account, which is why it is written DOMAIN\user. It was created by
-# ../lab/win_ad/join-sqlservers.ps1 and made a local administrator on both
-# Windows servers.
-#
-# Single quotes: in double quotes YAML would read the backslash as the start
-# of an escape sequence.
 ansible_user: 'DATASAT\ansiuser'
 
-# The password itself is not here. It lives encrypted in
-# group_vars/sqlservers/vault.yml, which Ansible Vault keeps unreadable until
-# you give it the vault password. That file is safe to commit; this one tells
-# you where to look.
-#
-# The "vault_" prefix is a convention, not a rule. It marks, at a glance, the
-# variables whose real value is encrypted somewhere else.
 ansible_password: "{{ vault_lab_ansiuser_password }}"
 
-# The SQL modules used in these playbooks come from the lowlydba.sqlserver
-# collection, which is a wrapper around the PowerShell module "dbatools".
-#
-# Those modules run ON the Windows server (dbatools is installed there by
-# ../lab/bootstrap-windows.ps1), so "localhost" below means "the SQL Server on
-# this machine", not your laptop.
 sql_instance: localhost

@@ -1,38 +1,11 @@
 ---
-# How Ansible connects to Linux machines. Plain SSH, and Python is already
-# there, so nothing special is needed.
-
 ansible_connection: ssh
 
-# The same account name as the Windows servers, and the same password, but a
-# LOCAL user here rather than a domain one - sqllin01 was never joined to the
-# domain. ../lab/bootstrap-linux.sh creates it, with sudo that does not ask
-# again, which is what "become: true" in the playbooks needs.
-#
-# Deliberately not azureuseradmin. That account is for you, when something is
-# broken. Automation gets its own, so the two are told apart in the logs.
 ansible_user: ansiuser
 ansible_password: "{{ vault_lab_ansiuser_password }}"
 
-# Which Python to use on the server. Say it, rather than letting Ansible go
-# looking: the search works, but it prints a warning every single run, and it
-# would quietly pick a different Python if someone installed one later.
-# ../lab/bootstrap-linux.sh is what puts this one there.
 ansible_python_interpreter: /usr/bin/python3
 
-# The package repository for SQL Server 2025 on Linux.
-# Note the name: "mssql-server-2025". During the preview it was
-# "mssql-server-preview", and scripts that hard-coded that name broke.
-#
-# The file this returns is one line, and it ends with
-# "signed-by=/usr/share/keyrings/microsoft-prod.gpg". That path is not a
-# suggestion - it is the only key apt will accept for this repository, which
-# is why install_linux.yml goes to the trouble of putting the key exactly
-# there.
 sql_repo_url: https://packages.microsoft.com/config/ubuntu/24.04/mssql-server-2025.list
 
-# The general Microsoft repository, which is where the command line tools
-# (sqlcmd and bcp) live. They are NOT in the mssql-server repository above -
-# that one holds the database engine and nothing else. Same key, pinned the
-# same way.
 sql_tools_repo_url: https://packages.microsoft.com/config/ubuntu/24.04/prod.list

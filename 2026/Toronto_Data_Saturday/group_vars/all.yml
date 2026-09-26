@@ -1,37 +1,13 @@
 ---
-# Variables for every server. group_vars/all.yml is loaded automatically.
-
-# --- SQL Server 2025 facts -------------------------------------------------
-# Released 18 November 2025. The engine is version 17, so the docs call it
-# "ver17" and the compatibility level is 170.
 sql_build: "17.0.1000.7"
 sql_compat_level: 170
 
-
-# --- THE BUILD STANDARD ----------------------------------------------------
-# This is the important part of the whole repo.
-#
-# These numbers are what every SQL Server *should* be set to. Playbook
-# 3_baseline.yml reads them and makes the servers match. Change a number here
-# and you have changed the standard for the entire estate.
-#
-# This file is the thing you put in version control and review in a pull
-# request. Not a script. Numbers.
-
-# How many CPU cores one query may use. The default is 0, meaning "all of
-# them", which is almost never what you want.
 baseline_maxdop: 4
 
-# How expensive a query must be before SQL Server bothers to parallelise it.
-# The default is still 5, a number chosen in 1997.
 baseline_cost_threshold: 50
 
-# Memory ceiling in MB, so SQL Server leaves some for the operating system.
-# Here: a 32 GB server, leaving 8 GB for Windows.
 baseline_max_memory_mb: 24576
 
-# Compress backups by default. Smaller and usually faster.
 baseline_backup_compression: true
 
-# Stop writing a log entry for every successful backup (trace flag 3226).
 baseline_trace_flag_3226: true
