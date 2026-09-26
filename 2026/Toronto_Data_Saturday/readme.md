@@ -47,10 +47,10 @@ playbooks use — the Windows ones and the SQL Server ones.
 
 Every server is managed through one account, `ansiuser`, with one password:
 
-| Server | `ansiuser` is | Created by |
-|---|---|---|
-| sqlwin01, sqlwin02 | a domain account, local admin on both | `../lab/win_ad/join-sqlservers.ps1` |
-| sqllin01 | a local account, with passwordless sudo | `../lab/bootstrap-linux.sh` |
+| Server | `ansiuser` is |
+|---|---|
+| sqlwin01, sqlwin02 | a domain account, local admin on both |
+| sqllin01 | a local account, with passwordless sudo |
 
 It is deliberately **not** `azureuseradmin`. That is the account Azure made for
 you, the human, and it is what you fall back on when something is broken.
@@ -261,9 +261,6 @@ playbooks/
   undo_availability_group.yml rehearsal helper: undoes demo 4
 
 docs/                 The session slides (PDF)
-
-(The scripts that create the Azure VMs live in ../lab/ - separate on purpose,
-since they are not part of the demo.)
 ```
 
 ---
@@ -284,8 +281,8 @@ most of the normal modules don't work on them.
 **A local admin over WinRM is not an admin.** Log in over the network with a
 local account and Windows quietly hands you a stripped-down token, so tasks
 fail with "Access is denied" from an account you can see is an administrator.
-`LocalAccountTokenFilterPolicy` in `../lab/bootstrap-windows.ps1` is what turns
-that off. A domain account does not have the problem, which is the real reason
+Setting the `LocalAccountTokenFilterPolicy` registry value is what turns that
+off. A domain account does not have the problem, which is the real reason
 production uses Kerberos.
 
 **`setup.exe` is not idempotent.** Neither is `mssql-conf setup` on Linux.

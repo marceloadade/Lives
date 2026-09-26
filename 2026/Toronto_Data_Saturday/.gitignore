@@ -3,6 +3,7 @@
 
 # Secrets — never commit these
 docs/demo_env.txt
+docs/demo_env_steps.txt
 group_vars/secrets.yml
 
 # Generated
