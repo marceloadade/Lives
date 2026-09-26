@@ -1,0 +1,85 @@
+---
+# DEMO 1 — "There is no agent on any of these servers."
+#
+#   ansible-playbook playbooks/1_facts.yml
+#
+# Nothing is installed on the targets. Ansible connects over WinRM on Windows
+# and SSH on Linux — both are already part of the operating system — runs some
+# code, and disconnects. That is the whole model.
+#
+# This playbook only READS SQL Server. It cannot change anything there, which
+# is why it is the safest possible first thing to run against servers you
+# don't own yet. (One lab-only exception, marked below: a dbatools setting.)
+
+- name: Check that every server answers
+  hosts: sqlservers
+  gather_facts: false
+
+  tasks:
+
+    - name: Ping the Windows servers
+      # win_ping is not a network ping. It proves Ansible can log in and run
+      # code. A network ping would only prove the machine is powered on.
+      ansible.windows.win_ping:
+      when: inventory_hostname in groups['windows']
+
+    - name: Ping the Linux servers
+      ansible.builtin.ping:
+      when: inventory_hostname in groups['linux']
+
+
+- name: Collect SQL Server version information
+  hosts: windows
+  gather_facts: false
+
+  tasks:
+
+    # LAB ONLY. The lab's SQL Servers use self-signed certificates, and
+    # dbatools refuses them unless told otherwise: "The certificate chain was
+    # issued by an authority that is not trusted".
+    #
+    # ../lab/bootstrap-windows.ps1 does tell it, but only for the account that
+    # ran the script - dbatools keeps its settings per user. Ansible logs in as
+    # ansiuser, a different account, so it never saw them. Saving them at
+    # machine level ("SystemDefault") covers every account, ansiuser included.
+    #
+    # Do not copy this into a real environment. Give the servers proper
+    # certificates instead.
+    - name: Does dbatools already trust the lab certificates?
+      # Check first, so a second run changes nothing. win_shell cannot tell
+      # on its own whether it has work to do.
+      ansible.windows.win_shell: |
+        if ((Get-DbatoolsConfigValue -FullName sql.connection.trustcert) -eq $true -and
+            (Get-DbatoolsConfigValue -FullName sql.connection.encrypt) -eq $false) {
+          'yes'
+        } else {
+          'no'
+        }
+      register: dbatools_trusts
+      changed_when: false
+
+    - name: Tell dbatools to trust the lab certificates, for every account
+      ansible.windows.win_shell: |
+        Set-DbatoolsConfig -FullName sql.connection.trustcert -Value $true -PassThru |
+          Register-DbatoolsConfig -Scope SystemDefault
+        Set-DbatoolsConfig -FullName sql.connection.encrypt -Value $false -PassThru |
+          Register-DbatoolsConfig -Scope SystemDefault
+      when: dbatools_trusts.stdout is search('no')
+
+    - name: Ask each SQL Server what it is
+      lowlydba.sqlserver.instance_info:
+        sql_instance: "{{ sql_instance }}"
+      register: sql
+
+    - name: Show what came back
+      ansible.builtin.debug:
+        msg: >-
+          {{ inventory_hostname }}:
+          build {{ sql.data.VersionString }},
+          patch level {{ sql.data.ProductLevel }},
+          collation {{ sql.data.Collation }}
+
+    - name: Point out anything not on the current build
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }} is BEHIND. Expected {{ sql_build }}."
+      when: sql.data.VersionString is version(sql_build, '<')

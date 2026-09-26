@@ -1,0 +1,28 @@
+---
+# The list of servers Ansible manages. That's all an inventory is.
+#
+# Groups matter for two reasons:
+#   windows / linux  -> how Ansible connects to the machine
+#   sqlservers       -> which machines the SQL playbooks run against
+#
+# Variables for each group live in group_vars/<group name>.yml
+
+windows:
+  hosts:
+    sqlwin01:
+      ansible_host: 20.115.160.253
+    sqlwin02:
+      ansible_host: 20.69.104.81
+
+
+linux:
+  hosts:
+    sqllin01:
+      ansible_host: 13.66.166.87
+
+
+# A group made of other groups.
+sqlservers:
+  children:
+    windows:
+    linux:

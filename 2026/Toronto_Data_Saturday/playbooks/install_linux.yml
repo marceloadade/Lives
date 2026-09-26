@@ -1,0 +1,137 @@
+---
+# OPTIONAL — the Linux half of demo 2. Cut this first if you are short on time.
+#
+#   ansible-playbook playbooks/install_linux.yml
+#
+# Same job as 2_install.yml, different operating system. Worth showing for
+# thirty seconds so people see it is the same tool and the same shape of file.
+#
+# Two SQL Server 2025 facts that catch people out:
+#   - The repository is "mssql-server-2025". In preview it was
+#     "mssql-server-preview" and that name no longer works.
+#   - SUSE Linux is not supported from 2025 onward at all.
+#
+# This installs the engine AND the command line tools, which come from a
+# second repository. On Windows you get both from one installer; on Linux
+# they are separate packages, and that catches people out too.
+
+- name: Install SQL Server 2025 on Linux
+  hosts: linux
+  become: true
+
+  tasks:
+
+    - name: Download Microsoft's signing key
+      # apt will not install a package unless it can prove who built it. This
+      # is that proof.
+      ansible.builtin.get_url:
+        url: https://packages.microsoft.com/keys/microsoft.asc
+        dest: /tmp/microsoft.asc
+        mode: "0644"
+
+    - name: Convert the key into the format apt expects, in the place it looks
+      # Two fussy details, and getting either wrong gives you the same
+      # unhelpful "NO_PUBKEY ... the repository is not signed" error.
+      #
+      # THE PLACE. The repository file downloaded in the next task ends with
+      # "signed-by=/usr/share/keyrings/microsoft-prod.gpg". That names the one
+      # key allowed to sign this repository, so a key anywhere else - even in
+      # apt's global trusted.gpg.d folder - is not looked at.
+      #
+      # THE FORMAT. Microsoft publishes the key as text ("ASCII armored").
+      # A file named .gpg has to be binary, which is what --dearmor does.
+      #
+      # "creates:" is how you make a plain command idempotent: if that file is
+      # already there, Ansible does not run the command and reports "ok".
+      ansible.builtin.command:
+        cmd: gpg --dearmor -o /usr/share/keyrings/microsoft-prod.gpg /tmp/microsoft.asc
+        creates: /usr/share/keyrings/microsoft-prod.gpg
+
+    - name: Add the SQL Server 2025 package repository
+      ansible.builtin.get_url:
+        url: "{{ sql_repo_url }}"
+        dest: /etc/apt/sources.list.d/mssql-server-2025.list
+        mode: "0644"
+
+    - name: Install SQL Server
+      ansible.builtin.apt:
+        name: mssql-server
+        state: present
+        update_cache: true
+
+    - name: Has setup already been run?
+      # mssql-conf setup is not safe to run twice, exactly like setup.exe on
+      # Windows. So: check first.
+      #
+      # We look for master.mdf rather than mssql.conf. mssql.conf is only a
+      # settings file and can exist while setup has not finished - a setup
+      # that died halfway leaves one behind. master.mdf is a system database,
+      # and it does not exist until setup has genuinely completed. Pick the
+      # thing that only exists on success.
+      ansible.builtin.stat:
+        path: /var/opt/mssql/data/master.mdf
+      register: configured
+
+    - name: Run the initial setup
+      # The sa password comes from the encrypted vault, the same place the
+      # connection password comes from. It is never typed here and never
+      # committed in the clear.
+      #
+      # On Linux there is no "Windows authentication", so sa is not optional
+      # the way it is on Windows - setup refuses to finish without a password
+      # for it.
+      ansible.builtin.command: /opt/mssql/bin/mssql-conf -n setup
+      environment:
+        ACCEPT_EULA: "Y"
+        MSSQL_PID: Developer
+        MSSQL_SA_PASSWORD: "{{ vault_lab_sa_password }}"
+      when: not configured.stat.exists
+      changed_when: true
+      # Keeps the password out of the terminal output and the logs.
+      no_log: true
+
+    - name: Make sure SQL Server is running
+      ansible.builtin.systemd_service:
+        name: mssql-server
+        state: started
+        enabled: true
+
+    # --- The command line tools --------------------------------------------
+    #
+    # sqlcmd and bcp. Installing the engine does not give you a way to talk to
+    # it, which surprises people coming from the Windows installer.
+    #
+    # They come from a DIFFERENT Microsoft repository - the general one, not
+    # the mssql-server one - so it has to be added too. Same signing key,
+    # already in place from the tasks at the top of this file.
+
+    - name: Add the general Microsoft package repository
+      ansible.builtin.get_url:
+        url: "{{ sql_tools_repo_url }}"
+        dest: /etc/apt/sources.list.d/mssql-release.list
+        mode: "0644"
+
+    - name: Install the command line tools
+      # ACCEPT_EULA is how you agree to the licence without a prompt. Leave it
+      # out and the install stops halfway, waiting for an answer that is never
+      # coming, because nobody is sitting at this machine.
+      #
+      # unixodbc-dev is a dependency you have to name yourself.
+      ansible.builtin.apt:
+        name:
+          - mssql-tools18
+          - unixodbc-dev
+        state: present
+        update_cache: true
+      environment:
+        ACCEPT_EULA: "Y"
+
+    - name: Put sqlcmd on everybody's PATH
+      # The tools install to /opt, which is not somewhere the shell looks. A
+      # file in /etc/profile.d runs at login for every user, which beats
+      # editing one person's .bashrc and wondering later why it only works
+      # for them.
+      ansible.builtin.copy:
+        content: 'export PATH="$PATH:/opt/mssql-tools18/bin"'
+        dest: /etc/profile.d/mssql-tools.sh
+        mode: "0644"

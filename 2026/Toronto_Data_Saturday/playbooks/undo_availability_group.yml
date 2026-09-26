@@ -1,0 +1,215 @@
+---
+# REHEARSAL HELPER — undo everything 4_availability_group.yml did.
+#
+#   ansible-playbook playbooks/undo_availability_group.yml --ask-vault-pass
+#
+# Run this to get the servers back to where they were before demo 4, so you
+# can run demo 4 again from a clean start.
+#
+# It is demo 4 backwards. Building went: feature, cluster, Always On +
+# endpoint, availability group. Tearing down goes the other way:
+#
+#   1. the availability group (and its listener with it)
+#   2. the demo database, on both servers
+#   3. the mirroring endpoint, the servers' logins for it, and Always On
+#   4. the Windows failover cluster
+#   5. the Windows clustering feature
+#
+# Each step is its own play, so it finishes on EVERY server before the next
+# step starts. That matters here: you do not want one server tearing down the
+# cluster while the other is still using it.
+#
+# Every task checks before it acts, so running this twice is safe - the second
+# run finds nothing left to remove.
+#
+# This DELETES things. It is for a lab, not for a server anybody depends on.
+
+# --- 1. the availability group (module exists) ----------------------------
+- name: Remove the availability group
+  hosts: windows
+  gather_facts: false
+  # One server at a time, same as building it.
+  serial: 1
+
+  vars:
+    ag_name: AG_DEMO
+
+  tasks:
+
+    - name: Drop the availability group
+      # The same module that created it, with "state: absent". Dropping the
+      # group drops its listener too, so there is no separate listener step.
+      #
+      # It runs on both servers on purpose. Normally the first one removes
+      # the group everywhere and the second finds nothing to do. But if the
+      # group had failed over, or a server was offline, a leftover copy can
+      # stay behind on the other server - and this catches it.
+      lowlydba.sqlserver.availability_group:
+        sql_instance: "{{ sql_instance }}"
+        ag_name: "{{ ag_name }}"
+        state: absent
+
+
+# --- 2 and 3. the demo database, the endpoint, Always On ------------------
+- name: Remove the endpoint and turn Always On off
+  hosts: windows
+  gather_facts: false
+  serial: 1
+
+  vars:
+    ag_database: DemoDB
+    domain: DATASAT
+
+  tasks:
+
+    - name: Drop the demo database
+      # Demo 4 created DemoDB on the first server, and automatic seeding
+      # copied it to the second. Both copies go. The one on the second server
+      # is stuck in RESTORING once the group is gone and could not be used
+      # anyway.
+      #
+      # SINGLE_USER WITH ROLLBACK IMMEDIATE throws out anyone still connected
+      # (a forgotten SSMS window, say), which would otherwise block the drop.
+      # A RESTORING copy has no connections and cannot be ALTERed, so it is
+      # dropped straight away.
+      #
+      # nonquery always reports "changed", even when the IF found nothing.
+      lowlydba.sqlserver.nonquery:
+        sql_instance: "{{ sql_instance }}"
+        database: master
+        nonquery: |
+          IF EXISTS (SELECT 1 FROM sys.databases
+                     WHERE name = N'{{ ag_database }}' AND state_desc = N'ONLINE')
+            ALTER DATABASE [{{ ag_database }}] SET SINGLE_USER WITH ROLLBACK IMMEDIATE;
+          IF DB_ID(N'{{ ag_database }}') IS NOT NULL
+            DROP DATABASE [{{ ag_database }}];
+
+    - name: Drop the mirroring endpoint
+      # No module for this, so it is plain SQL - same as creating it was.
+      # The IF EXISTS is what stops a second run from failing.
+      lowlydba.sqlserver.nonquery:
+        sql_instance: "{{ sql_instance }}"
+        database: master
+        nonquery: |
+          IF EXISTS (SELECT 1 FROM sys.endpoints WHERE name = N'hadr_endpoint')
+            DROP ENDPOINT [hadr_endpoint];
+
+    - name: Drop the servers' logins for the endpoint
+      # Demo 4 gave each server a login for both machine accounts, so the
+      # SQL Servers could connect to each other's endpoint. Nothing else
+      # uses them. The endpoint has to go first - a login that still holds a
+      # permission on an endpoint cannot be dropped.
+      lowlydba.sqlserver.nonquery:
+        sql_instance: "{{ sql_instance }}"
+        database: master
+        nonquery: |
+          IF EXISTS (SELECT 1 FROM sys.server_principals
+                     WHERE name = N'{{ domain }}\{{ groups['windows'][0] }}$')
+            DROP LOGIN [{{ domain }}\{{ groups['windows'][0] }}$];
+          IF EXISTS (SELECT 1 FROM sys.server_principals
+                     WHERE name = N'{{ domain }}\{{ groups['windows'][1] }}$')
+            DROP LOGIN [{{ domain }}\{{ groups['windows'][1] }}$];
+
+    - name: Turn Always On off in the SQL Server service
+      lowlydba.sqlserver.hadr:
+        sql_instance: "{{ sql_instance }}"
+        enabled: false
+      register: hadr
+
+    # SQL Server Agent depends on SQL Server, so Windows will not stop SQL
+    # Server while Agent is running: "Cannot stop service ... because it has
+    # dependent services". So it is three steps, in order: stop Agent,
+    # restart SQL Server, start Agent again.
+    - name: Stop SQL Server Agent first
+      ansible.windows.win_service:
+        name: SQLSERVERAGENT
+        state: stopped
+      when: hadr.changed
+
+    - name: Restart SQL Server so that takes effect
+      ansible.windows.win_service:
+        name: MSSQLSERVER
+        state: restarted
+      when: hadr.changed
+
+    - name: Start SQL Server Agent again
+      ansible.windows.win_service:
+        name: SQLSERVERAGENT
+        state: started
+      when: hadr.changed
+
+    - name: Make sure both services are running
+      # No "when:" on purpose. This runs every time, restart or not, so the
+      # play never finishes with SQL Server or Agent left stopped - even if
+      # an earlier run was interrupted halfway through the steps above.
+      # Already running reports "ok", so re-runs stay clean.
+      ansible.windows.win_service:
+        name: "{{ item }}"
+        state: started
+      loop:
+        - MSSQLSERVER
+        - SQLSERVERAGENT
+
+
+# --- 4. the cluster itself (no module — you write it) ---------------------
+- name: Remove the Windows failover cluster
+  # Run once, from the first server.
+  hosts: windows[0]
+  gather_facts: false
+
+  tasks:
+
+    - name: Is this server still in a cluster?
+      # Get-Cluster with no name asks THIS server which cluster it belongs to.
+      # Asking by name would go through the cluster's own IP address, which
+      # other machines on Azure cannot reach.
+      ansible.windows.win_shell: |
+        if (Get-Cluster -ErrorAction SilentlyContinue) {
+          'yes'
+        } else {
+          'no'
+        }
+      register: cluster_exists
+      changed_when: false
+
+    - name: Destroy the cluster
+      # Remove-Cluster takes every server out of the cluster in one go.
+      #
+      # -CleanupAD also deletes the computer accounts the cluster made in
+      # Active Directory: one for the cluster name (sqlclu01) and one for the
+      # listener (aglisten01). Leave them behind and the next demo 4 run
+      # fails, because those names are already taken.
+      ansible.windows.win_shell: |
+        Get-Cluster | Remove-Cluster -Force -CleanupAD
+      when: cluster_exists.stdout is search('yes')
+      # The "double hop" - see the same task in 4_availability_group.yml.
+      # Deleting accounts in Active Directory means talking to the domain
+      # controller, which a WinRM login cannot do on its own.
+      become: true
+      become_method: ansible.builtin.runas
+      become_user: "{{ ansible_user }}"
+      vars:
+        ansible_become_password: "{{ vault_lab_ansiuser_password }}"
+
+
+# --- 5. the clustering feature (module exists) ----------------------------
+- name: Remove the Windows clustering feature
+  hosts: windows
+  gather_facts: false
+  # One at a time, because each one reboots.
+  serial: 1
+
+  tasks:
+
+    - name: Uninstall failover clustering
+      ansible.windows.win_feature:
+        name:
+          - Failover-Clustering
+          - RSAT-Clustering-PowerShell
+        state: absent
+      register: feature
+
+    - name: Reboot if Windows asked for one
+      # Removing clustering always asks for one.
+      ansible.windows.win_reboot:
+      when: feature.reboot_required

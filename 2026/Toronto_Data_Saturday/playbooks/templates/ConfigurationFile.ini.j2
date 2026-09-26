@@ -1,0 +1,56 @@
+; SQL Server 2025 unattended setup answer file.
+;
+; Ansible generates this from a template, so every server gets the identical
+; file with only the bits that should differ filled in. Nobody edits it on the
+; server — you edit the template and run the playbook again.
+;
+; Generated for {{ inventory_hostname }}
+
+[OPTIONS]
+ACTION="Install"
+FEATURES=SQLENGINE
+INSTANCENAME="MSSQLSERVER"
+QUIET="True"
+IACCEPTSQLSERVERLICENSETERMS="True"
+
+; Do NOT let setup phone Microsoft Update looking for a newer build first.
+;
+; This one is not optional here. That search uses the Windows Update Agent,
+; and Windows refuses to let the Update Agent be driven from a remote logon -
+; which is exactly what Ansible is. Setup gets "Access is denied" and quits
+; before it installs anything. Run the same setup.exe by hand over RDP and it
+; works, which is what makes this a confusing one to debug.
+;
+; It also happens to be what you want: this build is pinned, and 5_patch.yml
+; is the demo that applies the cumulative update on purpose.
+UPDATEENABLED="False"
+
+; The account SQL Server runs as.
+SQLSVCACCOUNT="NT Service\MSSQLSERVER"
+SQLSVCSTARTUPTYPE="Automatic"
+AGTSVCACCOUNT="NT Service\SQLSERVERAGENT"
+AGTSVCSTARTUPTYPE="Automatic"
+
+; Who gets sysadmin.
+SQLSYSADMINACCOUNTS="{{ ansible_user }}"
+
+; Mixed mode: Windows logins AND SQL Server logins, which is what turns the
+; "sa" account on. Leave SECURITYMODE out entirely and you get Windows
+; authentication only, and sa stays disabled.
+;
+; SAPWD comes from the encrypted vault - same variable the Linux install uses,
+; so both servers end up with the same sa password. The rendered file has the
+; password in the clear, which is why 2_install.yml deletes it as soon as
+; setup has finished.
+SECURITYMODE="SQL"
+SAPWD="{{ vault_lab_sa_password }}"
+
+; Where the files go.
+INSTALLSQLDATADIR="C:\SQLData"
+SQLUSERDBLOGDIR="C:\SQLLog"
+SQLBACKUPDIR="C:\SQLBackup"
+
+; Let SQL Server allocate data files instantly instead of zeroing them out.
+SQLSVCINSTANTFILEINIT="True"
+
+TCPENABLED="1"

@@ -1,0 +1,53 @@
+---
+# DEMO 3 — The main one.
+#
+# Show me what is wrong, without changing anything:
+#   ansible-playbook playbooks/3_baseline.yml --check --diff
+#
+# Now fix it:
+#   ansible-playbook playbooks/3_baseline.yml --diff
+#
+# Same file. The only difference is --check. One of those is an audit report,
+# the other is the fix. That is the entire idea of this talk.
+#
+# The numbers being enforced are in group_vars/all.yml. Read them there, not
+# here — this playbook just applies whatever the standard says.
+
+- name: Make every SQL Server match the build standard
+  hosts: windows
+  gather_facts: false
+
+  tasks:
+
+    - name: Set the instance configuration options
+      # sp_configure is how SQL Server exposes its settings. This module reads
+      # the current value first and only writes if it differs, which is why
+      # --check can tell you the truth about what would change.
+      lowlydba.sqlserver.sp_configure:
+        sql_instance: "{{ sql_instance }}"
+        name: "{{ item.name }}"
+        value: "{{ item.value }}"
+      loop:
+        - name: max degree of parallelism
+          value: "{{ baseline_maxdop }}"
+
+        - name: cost threshold for parallelism
+          value: "{{ baseline_cost_threshold }}"
+
+        - name: backup compression default
+          value: "{{ 1 if baseline_backup_compression else 0 }}"
+      loop_control:
+        label: "{{ item.name }} = {{ item.value }}"
+
+    - name: Set the memory ceiling
+      # Note this module's option is called "max", not "max_memory".
+      lowlydba.sqlserver.memory:
+        sql_instance: "{{ sql_instance }}"
+        max: "{{ baseline_max_memory_mb }}"
+
+    - name: Turn on trace flag 3226
+      # One trace flag per task: trace_flag takes a single number, not a list.
+      lowlydba.sqlserver.traceflag:
+        sql_instance: "{{ sql_instance }}"
+        trace_flag: 3226
+        enabled: "{{ baseline_trace_flag_3226 }}"

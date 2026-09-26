@@ -1,0 +1,41 @@
+---
+# NOT A DEMO — a helper for rehearsing.
+#
+#   ansible-playbook playbooks/break_the_baseline.yml
+#
+# Deliberately misconfigures the servers so that demo 3 has something to find.
+# Run this right before you present, then run 3_baseline.yml --check --diff and
+# the screen fills up with things to fix.
+
+- name: Knock the servers out of compliance on purpose
+  hosts: windows
+  gather_facts: false
+
+  tasks:
+
+    - name: Set the options back to their unhelpful defaults
+      lowlydba.sqlserver.sp_configure:
+        sql_instance: "{{ sql_instance }}"
+        name: "{{ item.name }}"
+        value: "{{ item.value }}"
+      loop:
+        - { name: max degree of parallelism, value: 0 }
+        - { name: cost threshold for parallelism, value: 5 }
+        - { name: backup compression default, value: 0 }
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Remove the memory ceiling
+      lowlydba.sqlserver.memory:
+        sql_instance: "{{ sql_instance }}"
+        max: 2147483647
+
+    - name: Turn trace flag 3226 off
+      lowlydba.sqlserver.traceflag:
+        sql_instance: "{{ sql_instance }}"
+        trace_flag: 3226
+        enabled: false
+
+    - name: Done
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }} is now misconfigured. Ready for demo 3."

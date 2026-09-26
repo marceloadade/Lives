@@ -1,0 +1,25 @@
+---
+# Extra module packages these playbooks need. Install them with:
+#
+#   ansible-galaxy collection install -r requirements.yml
+#
+# ansible.builtin is included with Ansible itself, so it isn't listed here.
+#
+# The versions are pinned on purpose. Module options do change between
+# versions, and finding that out an hour before a talk is not fun.
+collections:
+
+  # The win_* modules: win_ping, win_service, win_command, win_reboot...
+  - name: ansible.windows
+    version: 3.8.0
+
+  # win_disk_image, which mounts the SQL Server ISO as a drive letter so
+  # setup.exe can be run from it. It lives in a separate collection from the
+  # other win_* modules purely for historical reasons.
+  - name: community.windows
+    version: 3.3.0
+
+  # The SQL Server modules. A wrapper around the PowerShell module "dbatools",
+  # which is why dbatools has to be installed on the Windows servers.
+  - name: lowlydba.sqlserver
+    version: 3.1.0

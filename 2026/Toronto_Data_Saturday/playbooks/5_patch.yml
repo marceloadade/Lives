@@ -1,0 +1,106 @@
+---
+# DEMO 5 — Patch the whole estate without logging into anything.
+#
+#   ansible-playbook playbooks/5_patch.yml
+#
+# The two most important lines in this file are "serial" and
+# "max_fail_percentage" below. They are the difference between automation a
+# DBA will allow near production and automation they will ban.
+#
+#   max_fail_percentage: 0  if one server fails, stop. Do not touch the rest.
+#
+# Without those, "run this on every server at once" is how you take an entire
+# estate down in ninety seconds.
+
+- name: Install the latest cumulative update
+  hosts: windows
+  gather_facts: false
+
+ 
+  max_fail_percentage: 0
+
+  vars:
+    # The folder the patch file goes in. Any SQL Server 2025 patch file
+    # dropped here is picked up, whatever its name - Microsoft names them
+    # after the KB article (SQLServer2025-KB5096981-x64.exe), so the name
+    # changes with every update and hard-coding it would mean editing this
+    # playbook every month.
+    cu_folder: C:\media\CU
+
+  tasks:
+
+    - name: What build is this server on now?
+      lowlydba.sqlserver.instance_info:
+        sql_instance: "{{ sql_instance }}"
+      register: before
+
+    - name: Find the patch file
+      ansible.windows.win_find:
+        paths: "{{ cu_folder }}"
+        patterns: SQLServer2025-*.exe
+      register: installer
+
+    - name: Stop with a clear message unless there is exactly one
+      # None: nothing to install. More than one: we would be guessing which
+      # one you meant, and guessing is not something you want from a
+      # playbook that patches production. Leave one file in the folder.
+      ansible.builtin.fail:
+        msg: >-
+          Expected exactly one SQLServer2025-*.exe in {{ cu_folder }},
+          found {{ installer.matched }}. Leave just the patch you want there.
+      when: installer.matched != 1
+
+    - name: Remember where it is
+      ansible.builtin.set_fact:
+        cu_installer: "{{ installer.files[0].path }}"
+
+    - name: Is Windows waiting for a restart?
+      # SQL Server setup refuses to patch a machine with a restart pending -
+      # left over from Windows Update, or a feature install - and quits after
+      # twenty seconds with exit code 2227047362 (0x84BE0BC2) and no message.
+      # These are the three places Windows records "restart me".
+      ansible.windows.win_shell: |
+        $pending = (Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending') -or
+                   (Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired') -or
+                   ($null -ne (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager' -Name PendingFileRenameOperations -ErrorAction SilentlyContinue))
+        if ($pending) { 'yes' } else { 'no' }
+      register: restart_pending
+      changed_when: false
+
+    - name: Restart first, so setup will run
+      ansible.windows.win_reboot:
+      when: restart_pending.stdout is search('yes')
+
+    - name: Install the cumulative update
+      # Just run whatever is in the folder. If this server already has it,
+      # setup finds nothing to patch and finishes quickly.
+      #
+      # If setup fails, max_fail_percentage: 0 stops the run and the next
+      # server is never touched.
+      ansible.windows.win_command: >-
+        "{{ cu_installer }}" /quiet /IAcceptSQLServerLicenseTerms
+        /Action=Patch /AllInstances
+      register: patch
+      failed_when: patch.rc not in [0, 3010]
+
+    - name: Reboot if the patch asked for one
+      # 3010 is Windows for "done, but restart me". Setup restarts SQL Server
+      # itself either way; only reboot the whole machine when it says so.
+      ansible.windows.win_reboot:
+      when: patch.rc == 3010
+
+    - name: Wait for SQL Server to start accepting connections again
+      ansible.windows.win_wait_for:
+        port: 1433
+        timeout: 600
+
+    - name: What build is it on now?
+      lowlydba.sqlserver.instance_info:
+        sql_instance: "{{ sql_instance }}"
+      register: after
+
+    - name: Show the before and after
+      ansible.builtin.debug:
+        msg: >-
+          {{ inventory_hostname }}:
+          {{ before.data.VersionString }} -> {{ after.data.VersionString }}

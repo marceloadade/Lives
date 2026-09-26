@@ -1,0 +1,91 @@
+---
+# DEMO 6 — Install SQL Server Management Studio 22, with no internet.
+#
+#   ansible-playbook playbooks/6_ssms.yml
+#
+# A small demo with a useful point: the thing you install is not always a
+# single .exe you can double-click. SSMS 22 is installed by the Visual Studio
+# Installer, which normally downloads what it needs while it runs. On a
+# locked-down server that is not allowed, so you give it a LAYOUT instead: a
+# folder holding every file it would have downloaded.
+#
+# The layout was made once, on a machine with internet, with:
+#
+#   vs_SSMS.exe --layout C:\media\SSMS\SSMS_Layout --lang en-US
+#
+# ...and then copied to the servers. Making it is a human job. Installing from
+# it is this playbook's job, and it is the part you would otherwise repeat by
+# hand on every server you own.
+#
+# Same shape as 2_install.yml: check first, install only if needed.
+
+- name: Install SQL Server Management Studio 22 from an offline layout
+  hosts: windows
+  gather_facts: false
+
+  vars:
+    # The layout folder, and the bootstrapper INSIDE it. Run the copy of
+    # vs_SSMS.exe that lives in the layout, not a loose one next to it: the
+    # bootstrapper only finds the layout by looking in its own folder. Run
+    # from anywhere else it assumes an online install, and with --noWeb it
+    # then fails with "A product matching the following parameters cannot be
+    # found" and exit code 1.
+    ssms_layout: C:\media\SSMS\SSMS_Layout
+    ssms_bootstrapper: C:\media\SSMS\SSMS_Layout\vs_SSMS.exe
+
+    # Where SSMS 22 puts itself when you do not tell it otherwise.
+    ssms_exe: C:\Program Files\Microsoft SQL Server Management Studio 22\Release\Common7\IDE\Ssms.exe
+
+  tasks:
+
+    - name: Is SSMS already installed?
+      # The guard. Nothing below this does anything if SSMS is already here.
+      ansible.windows.win_stat:
+        path: "{{ ssms_exe }}"
+      register: ssms
+
+    - name: Check the layout is actually on the server
+      ansible.windows.win_stat:
+        path: "{{ ssms_bootstrapper }}"
+      register: layout
+
+    - name: Stop with a clear message if the layout is missing
+      # Without this the installer fails with something unhelpful. A playbook
+      # that tells you what is wrong is worth the four extra lines.
+      ansible.builtin.fail:
+        msg: >-
+          No SSMS layout found at {{ ssms_bootstrapper }}.
+          Create one with "vs_SSMS.exe --layout {{ ssms_layout }} --lang en-US"
+          on a machine with internet, then copy the folder here.
+      when:
+        - not ssms.stat.exists
+        - not layout.stat.exists
+
+    - name: Install SSMS from the layout
+      # --noWeb is the whole point: use the files in the layout and do not go
+      # to the internet for anything.
+      #
+      # --quiet means no window, which matters because nobody is logged in to
+      # click it. --wait makes the bootstrapper stay alive until the install
+      # has actually finished, so the exit code below means something - it
+      # returns immediately without it, and the playbook would carry on while
+      # the install was still running.
+      ansible.windows.win_command: >-
+        "{{ ssms_bootstrapper }}"
+        --noWeb
+        --quiet
+        --norestart
+        --wait
+      when: not ssms.stat.exists
+      register: install
+      # 0 = done. 3010 = done, wants a reboot first. 1641 = done, and it
+      # started the reboot itself. Everything else is a real failure, and the
+      # Visual Studio Installer has a long list of them - 740 means it needed
+      # to be elevated, 8010 means the OS is too old.
+      failed_when: install.rc not in [0, 3010, 1641]
+
+    - name: Say what happened
+      ansible.builtin.debug:
+        msg: >-
+          {{ inventory_hostname }}:
+          {{ 'SSMS was already installed, nothing to do' if ssms.stat.exists else 'SSMS installed' }}

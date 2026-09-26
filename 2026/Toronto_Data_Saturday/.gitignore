@@ -1,0 +1,13 @@
+# Python virtual environment
+.venv/
+
+# Secrets — never commit these
+docs/demo_env.txt
+group_vars/secrets.yml
+
+# Generated
+*.retry
+.DS_Store
+
+# Installed to ~/.ansible/collections, never vendored here
+collections/

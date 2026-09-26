@@ -1,0 +1,328 @@
+---
+# DEMO 4 — An availability group (two servers, one database, automatic failover).
+#
+#   ansible-playbook playbooks/4_availability_group.yml --ask-vault-pass
+#
+# This is the demo where it is worth being honest about the limits of
+# off-the-shelf automation. Building an availability group needs four things,
+# and only two of them have a ready-made Ansible module:
+#
+#   1. The Windows clustering feature      -> module exists (win_feature)
+#   2. The Windows failover cluster itself -> NO MODULE. You write it.
+#   3. A mirroring endpoint                -> NO MODULE. You write it.
+#   4. The availability group + listener   -> module exists
+#
+# Steps 2 and 3 below are PowerShell and SQL wrapped in Ansible tasks, with a
+# hand-written "have I already done this?" check on the front. That is normal.
+# No collection builds you a Windows cluster.
+#
+# WHY FIVE PLAYS AND NOT ONE
+#
+# Each step needs the step before it finished on EVERY server. The cluster
+# needs the feature on both servers. Always On needs the server to be in the
+# cluster. The availability group needs Always On and the endpoint on both.
+#
+# One play that works through the servers one at a time gets that wrong: the
+# first server would reach "add the second server to the group" before the
+# second server had even started. So each step is its own play, and Ansible
+# finishes one play on every server before it starts the next.
+#
+# "hosts: windows[0]" means the first server in the windows group in
+# inventory.yml, and "windows[1]" the second. The first one is the primary.
+
+
+# --- 1. the clustering feature (module exists) ----------------------------
+- name: Install failover clustering on every server
+  hosts: windows
+  gather_facts: false
+  # One at a time, because each one may reboot.
+  serial: 1
+
+  tasks:
+
+    - name: Install the Windows failover clustering feature
+      ansible.windows.win_feature:
+        name:
+          - Failover-Clustering
+          - RSAT-Clustering-PowerShell
+        state: present
+        include_management_tools: true
+      register: feature
+
+    - name: Reboot if Windows asked for one
+      ansible.windows.win_reboot:
+      when: feature.reboot_required
+
+
+# --- 2. the cluster itself (no module — you write it) ---------------------
+- name: Build the Windows failover cluster
+  # Everything here runs on the first server. It creates the cluster, then
+  # adds the second server to it from there.
+  hosts: windows[0]
+  gather_facts: false
+
+  vars:
+    cluster_name: sqlclu01
+    cluster_ip: 172.16.0.40
+
+  tasks:
+
+    - name: Is this server already in a cluster?
+      # This check is what makes the next task safe to run twice. win_shell
+      # has no idea what it is running, so idempotency is your job.
+      #
+      # Get-Cluster with no name asks THIS server which cluster it belongs to.
+      # Asking for the cluster by name would go through the cluster's own IP
+      # address, and on Azure other machines cannot reach that address.
+      ansible.windows.win_shell: |
+        if (Get-Cluster -ErrorAction SilentlyContinue) {
+          'yes'
+        } else {
+          'no'
+        }
+      register: cluster_exists
+      changed_when: false
+
+    - name: Create the cluster
+      ansible.windows.win_shell: |
+        New-Cluster -Name '{{ cluster_name }}' `
+          -Node '{{ inventory_hostname }}' `
+          -StaticAddress '{{ cluster_ip }}' `
+          -NoStorage -Force
+      when: cluster_exists.stdout is search('no')
+      # WHY "become" IS HERE: the "double hop".
+      #
+      # New-Cluster does not only work on this server. It also asks the domain
+      # controller - a SECOND machine - whether the name sqlclu01 is free, and
+      # then creates a computer account for it there.
+      #
+      # Ansible's WinRM login cannot do that second hop. It proves who you are
+      # to this server, but leaves no password behind that this server could
+      # use to talk to another one. So the question to the domain controller
+      # goes unanswered, and the error is the unhelpful "Unable to determine
+      # if the computer 'sqlclu01' exists in the domain ... An operations
+      # error occurred."
+      #
+      # "become" logs in a second time, locally, as the same user. A local
+      # logon DOES hold your password, so it can reach the domain controller.
+      # Same trick as 2_install.yml, different reason for needing it.
+      become: true
+      become_method: ansible.builtin.runas
+      become_user: "{{ ansible_user }}"
+      vars:
+        ansible_become_password: "{{ vault_lab_ansiuser_password }}"
+
+    - name: Is the second server in the cluster yet?
+      ansible.windows.win_shell: |
+        if (Get-ClusterNode -Name '{{ groups['windows'][1] }}' -ErrorAction SilentlyContinue) {
+          'yes'
+        } else {
+          'no'
+        }
+      register: node_exists
+      changed_when: false
+
+    - name: Add the second server to the cluster
+      # Run from here, the first server, against the cluster it is already in.
+      # Same double hop as above: it talks to the second server.
+      ansible.windows.win_shell: |
+        Add-ClusterNode -Name '{{ groups['windows'][1] }}' -NoStorage
+      when: node_exists.stdout is search('no')
+      become: true
+      become_method: ansible.builtin.runas
+      become_user: "{{ ansible_user }}"
+      vars:
+        ansible_become_password: "{{ vault_lab_ansiuser_password }}"
+
+
+# --- 3. turn on Always On, and the endpoint (half a module) ---------------
+- name: Turn on Always On and create the endpoint on every server
+  hosts: windows
+  gather_facts: false
+  # One at a time, because each one restarts SQL Server.
+  serial: 1
+
+  vars:
+    # The domain's short name. Used below to name the servers' computer
+    # accounts, like DATASAT\sqlwin02$.
+    domain: DATASAT
+
+  tasks:
+
+    - name: Enable Always On in the SQL Server service
+      # This only works on a server that is already in a cluster, which is
+      # why it comes after step 2.
+      lowlydba.sqlserver.hadr:
+        sql_instance: "{{ sql_instance }}"
+        enabled: true
+      register: hadr
+
+    # SQL Server Agent depends on SQL Server, so Windows will not stop SQL
+    # Server while Agent is running: "Cannot stop service ... because it has
+    # dependent services". So it is three steps, in order: stop Agent,
+    # restart SQL Server, start Agent again.
+    - name: Stop SQL Server Agent first
+      ansible.windows.win_service:
+        name: SQLSERVERAGENT
+        state: stopped
+      when: hadr.changed
+
+    - name: Restart SQL Server so Always On takes effect
+      ansible.windows.win_service:
+        name: MSSQLSERVER
+        state: restarted
+      when: hadr.changed
+
+    - name: Start SQL Server Agent again
+      ansible.windows.win_service:
+        name: SQLSERVERAGENT
+        state: started
+      when: hadr.changed
+
+    - name: Make sure both services are running
+      # No "when:" on purpose. This runs every time, restart or not, so the
+      # play never finishes with SQL Server or Agent left stopped - even if
+      # an earlier run was interrupted halfway through the steps above.
+      # Already running reports "ok", so re-runs stay clean.
+      ansible.windows.win_service:
+        name: "{{ item }}"
+        state: started
+      loop:
+        - MSSQLSERVER
+        - SQLSERVERAGENT
+
+    - name: Create the mirroring endpoint
+      # No module for this, so it is plain SQL. The IF NOT EXISTS is what
+      # stops a second run from failing.
+      lowlydba.sqlserver.nonquery:
+        sql_instance: "{{ sql_instance }}"
+        database: master
+        nonquery: |
+          IF NOT EXISTS (SELECT 1 FROM sys.endpoints WHERE name = N'hadr_endpoint')
+            CREATE ENDPOINT [hadr_endpoint]
+              STATE = STARTED
+              AS TCP (LISTENER_PORT = 5022)
+              FOR DATABASE_MIRRORING (ROLE = ALL, ENCRYPTION = REQUIRED ALGORITHM AES);
+
+    - name: Let each server's SQL Server connect to the endpoint
+      # SQL Server runs as "NT Service\MSSQLSERVER", an account that only
+      # exists on its own machine. When it talks to ANOTHER server it shows
+      # up there as the machine's domain account instead - DATASAT\sqlwin01$,
+      # with the $ on the end. So each server needs a login for both machine
+      # accounts, allowed to connect to the endpoint. Without this the
+      # servers refuse each other and the database never synchronises.
+      #
+      # A login for its own machine account is harmless, and saves this task
+      # having to work out which server is "the other one".
+      lowlydba.sqlserver.nonquery:
+        sql_instance: "{{ sql_instance }}"
+        database: master
+        nonquery: |
+          IF NOT EXISTS (SELECT 1 FROM sys.server_principals
+                         WHERE name = N'{{ domain }}\{{ groups['windows'][0] }}$')
+            CREATE LOGIN [{{ domain }}\{{ groups['windows'][0] }}$] FROM WINDOWS;
+          IF NOT EXISTS (SELECT 1 FROM sys.server_principals
+                         WHERE name = N'{{ domain }}\{{ groups['windows'][1] }}$')
+            CREATE LOGIN [{{ domain }}\{{ groups['windows'][1] }}$] FROM WINDOWS;
+          GRANT CONNECT ON ENDPOINT::[hadr_endpoint] TO [{{ domain }}\{{ groups['windows'][0] }}$];
+          GRANT CONNECT ON ENDPOINT::[hadr_endpoint] TO [{{ domain }}\{{ groups['windows'][1] }}$];
+
+
+# --- 4. the availability group (module exists) ----------------------------
+- name: Build the availability group
+  # All of this runs on the first server - the primary.
+  hosts: windows[0]
+  gather_facts: false
+
+  vars:
+    ag_name: AG_DEMO
+    ag_database: DemoDB
+    listener_name: aglisten01
+    listener_ip: 172.16.0.41
+
+  tasks:
+
+    - name: Create the demo database
+      # An availability group protects databases, so it needs one to start
+      # with. In real life this is your application's database and it already
+      # exists. In the lab we make an empty one.
+      #
+      # Only on the primary: automatic seeding copies it to the second server.
+      #
+      # Full recovery is not optional. An availability group ships the
+      # transaction log to the other server, and in Simple recovery SQL Server
+      # throws the log away.
+      lowlydba.sqlserver.database:
+        sql_instance: "{{ sql_instance }}"
+        database: "{{ ag_database }}"
+        recovery_model: Full
+
+    - name: Create the availability group
+      lowlydba.sqlserver.availability_group:
+        sql_instance: "{{ sql_instance }}"
+        ag_name: "{{ ag_name }}"
+        database: "{{ ag_database }}"
+        availability_mode: SynchronousCommit
+        failover_mode: Automatic
+        seeding_mode: Automatic
+        # A database must have had a full backup before it can join a group.
+        # A brand new one never has. This takes that first backup to NUL -
+        # it satisfies the rule and writes nothing to disk. Fine for an empty
+        # demo database; for a real one you want a real backup.
+        allow_null_backup: true
+
+    - name: Add the second server as a replica
+      lowlydba.sqlserver.ag_replica:
+        sql_instance: "{{ sql_instance }}"
+        sql_instance_replica: "{{ groups['windows'][1] }}"
+        ag_name: "{{ ag_name }}"
+        availability_mode: SynchronousCommit
+        failover_mode: Automatic
+        seeding_mode: Automatic
+        endpoint_url: "TCP://{{ groups['windows'][1] }}:5022"
+      # The double hop again, this time into SQL Server: this runs on the
+      # first server and logs in to SQL Server on the SECOND one. Without
+      # "become" there is no password to log in with, and the second server
+      # sees "Login failed for user 'NT AUTHORITY\ANONYMOUS LOGON'".
+      become: true
+      become_method: ansible.builtin.runas
+      become_user: "{{ ansible_user }}"
+      vars:
+        ansible_become_password: "{{ vault_lab_ansiuser_password }}"
+
+    - name: Create the listener
+      # The listener is the payoff: one name that applications connect to,
+      # and it follows whichever server is currently primary.
+      lowlydba.sqlserver.ag_listener:
+        sql_instance: "{{ sql_instance }}"
+        ag_name: "{{ ag_name }}"
+        listener_name: "{{ listener_name }}"
+        ip_address: "{{ listener_ip }}"
+        subnet_mask: 255.255.255.0
+        port: 1433
+
+
+# --- 5. let the second server receive the database -----------------------
+- name: Let the second server receive the database
+  hosts: windows[1]
+  gather_facts: false
+
+  vars:
+    ag_name: AG_DEMO
+
+  tasks:
+
+    - name: Allow automatic seeding to create the database here
+      # Automatic seeding creates the database on the second server by
+      # itself - but only once that server says the group may create
+      # databases on it. Without this line the group looks healthy and the
+      # database simply never arrives.
+      #
+      # The IF EXISTS matters: the group only shows up here once this server
+      # has joined it.
+      lowlydba.sqlserver.nonquery:
+        sql_instance: "{{ sql_instance }}"
+        database: master
+        nonquery: |
+          IF EXISTS (SELECT 1 FROM sys.availability_groups WHERE name = N'{{ ag_name }}')
+            ALTER AVAILABILITY GROUP [{{ ag_name }}] GRANT CREATE ANY DATABASE;

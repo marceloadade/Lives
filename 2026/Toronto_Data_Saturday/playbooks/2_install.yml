@@ -1,0 +1,127 @@
+---
+# DEMO 2 — Install SQL Server 2025.
+#
+#   ansible-playbook playbooks/2_install.yml
+#
+# The first run takes 6-12 minutes, which is why it is recorded rather than
+# run live.
+#
+# THE POINT OF THIS DEMO IS THE SECOND RUN.
+# Run it again and everything comes back "ok" with changed=0. Nothing happens,
+# because there is nothing left to do. That is what "idempotent" means, and it
+# is the thing a copied PowerShell script can never give you.
+#
+# Be honest about why it works: setup.exe is NOT idempotent. Run it twice by
+# hand and it errors. The "Is SQL Server already installed?" check below is
+# what makes the playbook safe to re-run, and a human wrote that check.
+
+- name: Install SQL Server 2025 on Windows
+  hosts: windows
+  gather_facts: false
+
+  tasks:
+
+    - name: Is SQL Server already installed?
+      # This is the guard. Everything below it is skipped if SQL is present.
+      ansible.windows.win_reg_stat:
+        path: HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server\Instance Names\SQL
+        name: MSSQLSERVER
+      register: installed
+
+    - name: Create the folders SQL Server will use
+      ansible.windows.win_file:
+        path: "{{ item }}"
+        state: directory
+      loop:
+        - C:\SQLData
+        - C:\SQLLog
+        - C:\SQLBackup
+
+    - name: Mount the SQL Server ISO
+      # The media is an .iso, so there is no setup.exe to run until Windows
+      # opens it as a drive. Windows picks the drive letter itself, so we keep
+      # the result and use whatever it hands back rather than guessing "D:".
+      community.windows.win_disk_image:
+        image_path: C:\media\SQL2025\SQLServer2025-x64-ENU.iso
+        state: present
+      when: not installed.exists
+      register: iso
+
+    - name: Write the setup answer file
+      # setup.exe reads its options from this file instead of 30 command line
+      # switches. The template lives next to this playbook in templates/.
+      #
+      # It goes in C:\media and not on the mounted ISO, because an ISO is
+      # read-only.
+      #
+      # The rendered file contains the sa password in the clear, so: no_log
+      # keeps it out of the terminal and the logs, and the task further down
+      # deletes the file once setup has used it.
+      ansible.windows.win_template:
+        src: ConfigurationFile.ini.j2
+        dest: C:\media\ConfigurationFile.ini
+      when: not installed.exists
+      no_log: true
+
+    - name: Run the SQL Server installer
+      ansible.windows.win_command: >-
+        {{ iso.mount_paths[0] }}setup.exe
+        /Q
+        /IACCEPTSQLSERVERLICENSETERMS
+        /ConfigurationFile=C:\media\ConfigurationFile.ini
+      when: not installed.exists
+      register: setup
+      # 3010 means "it worked, but Windows wants a reboot".
+      failed_when: setup.rc not in [0, 3010]
+
+      # WHY "become" IS HERE, because this is the least obvious line in the repo.
+      #
+      # When Ansible connects over WinRM it gets a NETWORK logon. That is a
+      # limited kind of logon: it proves who you are, but it has no access to
+      # your Windows profile. Setup needs the profile, because it encrypts the
+      # sa password with DPAPI before writing it into its own settings file,
+      # and DPAPI keys live in the profile. Without one it fails with
+      # "The computer must be trusted for delegation", which sounds like an
+      # Active Directory problem and is not one.
+      #
+      # "become" logs in a second time, locally on the server, as the same
+      # user - this time as a full interactive logon with the profile loaded.
+      # Same idea as "become: true" on Linux, different reason for needing it.
+      become: true
+      become_method: ansible.builtin.runas
+      become_user: "{{ ansible_user }}"
+      become_flags: logon_type=interactive logon_flags=with_profile
+      vars:
+        # The second logon needs the password again. Same one, same vault.
+        ansible_become_password: "{{ vault_lab_ansiuser_password }}"
+
+    - name: Delete the answer file
+      # It has SAPWD in it in plain text. setup.exe has read it by now, so it
+      # has done its job and there is no reason to leave it on the disk.
+      #
+      # No "when:" on this one on purpose - it should be gone whether or not
+      # this run was the one that installed SQL Server. Deleting a file that
+      # is already deleted reports "ok", so re-runs stay clean.
+      ansible.windows.win_file:
+        path: C:\media\ConfigurationFile.ini
+        state: absent
+
+    - name: Unmount the ISO
+      # Tidy up. A mounted image outlives the WinRM session, so without this
+      # the drive letter stays on the server until somebody reboots it.
+      community.windows.win_disk_image:
+        image_path: C:\media\SQL2025\SQLServer2025-x64-ENU.iso
+        state: absent
+      when: not installed.exists
+
+    - name: Make sure the SQL Server service is running
+      ansible.windows.win_service:
+        name: MSSQLSERVER
+        state: started
+        start_mode: auto
+
+    - name: Say what happened
+      ansible.builtin.debug:
+        msg: >-
+          {{ inventory_hostname }}:
+          {{ 'already installed, nothing to do' if installed.exists else 'installed' }}
